@@ -1,17 +1,16 @@
 import sys
 import time
 import asyncio
-import threading
 from datetime import date, datetime
 from pathlib import Path
 import importlib.util
-import requests
 import pytz
+
 from aiohttp import web
-from PIL import Image 
-from pyrogram import Client, idle, __version__
+from pyrogram import idle, __version__
 from pyrogram.raw.all import layer
 import pyrogram.utils
+
 from database.ia_filterdb import Media, Media2
 from database.users_chats_db import db
 from info import *
@@ -19,31 +18,16 @@ from utils import temp
 from Script import script
 from plugins import web_server, check_expired_premium
 from Lucia.Bot import SilentX
-from Lucia.util.keepalive import ping_server
 from Lucia.Bot.clients import initialize_clients
 from logging_helper import LOGGER
 
+# ⏱️ Start time
 botStartTime = time.time()
 
 pyrogram.utils.MIN_CHANNEL_ID = -1009147483647
 
-def ping_loop():
-    while True:
-        try:
-            r = requests.get(URL, timeout=10)
-            if r.status_code == 200:
-                LOGGER.info("✅ Ping Successful")
-            else:
-                LOGGER.error(f"⚠️ Ping Failed: {r.status_code}")
-        except Exception as e:
-            LOGGER.error(f"❌ Exception During Ping: {e}")
-        time.sleep(120)
 
-
-if URL:
-    threading.Thread(target=ping_loop, daemon=True).start()
-
-
+# 🔌 Plugin Loader
 def silentx_plugins_handler(app, plugins_dir: str | Path = "plugins", package_name: str = "plugins") -> list[str]:
     plugins_dir = Path(plugins_dir)
     loaded_plugins: list[str] = []
@@ -62,7 +46,6 @@ def silentx_plugins_handler(app, plugins_dir: str | Path = "plugins", package_na
         try:
             spec = importlib.util.spec_from_file_location(import_path, file)
             if spec is None or spec.loader is None:
-                LOGGER.warning("Skipping %s (No Spec/Loader).", file)
                 continue
 
             module = importlib.util.module_from_spec(spec)
@@ -70,100 +53,105 @@ def silentx_plugins_handler(app, plugins_dir: str | Path = "plugins", package_na
             sys.modules[import_path] = module
             loaded_plugins.append(import_path)
 
-            short_name = import_path.removeprefix(f"{package_name}.")
-            LOGGER.info("🔌 Loaded plugin: %s", short_name)
+            LOGGER.info("🔌 Loaded plugin: %s", import_path)
 
-        except Exception:
-            LOGGER.exception("Failed To Import Plugin: %s", import_path)
-
-    disp = getattr(app, "dispatcher", None)
-    if disp is None:
-        LOGGER.warning("App Has No Dispatcher; Skipping Handler Regroup.")
-        return loaded_plugins
-
-    if 0 in disp.groups:
-        all_handlers = list(disp.groups[0])
-        for i, handler in enumerate(all_handlers):
-            disp.remove_handler(handler, group=0)
-            disp.add_handler(handler, group=i)
-    else:
-        LOGGER.info("No Handlers In Group 0; Nothing To Regroup.")
+        except Exception as e:
+            LOGGER.error(f"Failed To Import Plugin: {import_path} | {e}")
 
     return loaded_plugins
 
 
+# 🚀 MAIN START FUNCTION
 async def SilentXBotz_start():
-    if MULTIPLE_DB and not DATABASE_URI2:
-        LOGGER.error("DATABASE_URI2 Is Not Provided But MULTIPLE_DB Is Set To True. Please Fill The DATABASE_URI2 Var!")
-        sys.exit(1)
+
+    # 🔴 ENV CHECK
     if not API_ID or not API_HASH or not BOT_TOKEN:
-        LOGGER.error("Missing required environment variables (API_ID, API_HASH, or BOT_TOKEN)")
+        LOGGER.error("Missing API_ID / API_HASH / BOT_TOKEN")
         sys.exit(1)
 
-    LOGGER.info("Initializing Your Bot!")
+    if MULTIPLE_DB and not DATABASE_URI2:
+        LOGGER.error("DATABASE_URI2 missing while MULTIPLE_DB enabled")
+        sys.exit(1)
+
+    LOGGER.info("🚀 Starting Bot...")
+
+    # 🤖 Start bot
     await SilentX.start()
     bot_info = await SilentX.get_me()
     SilentX.username = bot_info.username
+
+    # 👥 Multi clients
     await initialize_clients()
-    loaded_plugins = silentx_plugins_handler(SilentX)
-    if loaded_plugins:
-        LOGGER.info("✅ Plugins Loaded: %d", len(loaded_plugins))
-    else:
-        LOGGER.info("⚠️ No Plugins Loaded.")
-    if ON_HEROKU:
-        asyncio.create_task(ping_server())
+
+    # 🔌 Load plugins
+    plugins = silentx_plugins_handler(SilentX)
+    LOGGER.info(f"✅ Plugins Loaded: {len(plugins)}")
+
+    # 🚫 Banned users
     try:
         b_users, b_chats = await db.get_banned()
         temp.BANNED_USERS = b_users
         temp.BANNED_CHATS = b_chats
     except Exception as e:
-        LOGGER.error(f"Error fetching banned users/chats: {e}")
+        LOGGER.error(f"Banned fetch error: {e}")
+
+    # 📂 DB indexes
     try:
         await Media.ensure_indexes()
         if MULTIPLE_DB:
             await Media2.ensure_indexes()
-            LOGGER.info("Multiple Database Mode On. Now Files Will Be Saved In Second DB If First DB Is Full")
-        else:
-            LOGGER.info("Single DB Mode On! Files Will Be Saved In First Database")
     except Exception as e:
-        LOGGER.error(f"Error ensuring indexes: {e}")
+        LOGGER.error(f"DB index error: {e}")
+
+    # 👤 Bot info
     me = await SilentX.get_me()
     temp.ME = me.id
     temp.U_NAME = me.username
     temp.B_NAME = me.first_name
     temp.B_LINK = me.mention
-    SilentX.username = "@" + me.username
+
+    # 🔄 Premium checker
     SilentX.loop.create_task(check_expired_premium(SilentX))
+
     LOGGER.info(
-        "%s with Pyrofork v%s (Layer %s) started on @%s.",
+        "%s started | Pyrofork v%s | Layer %s",
         me.first_name,
         __version__,
         layer,
-        me.username,
     )
+
     LOGGER.info(script.LOGO)
-    tz = pytz.timezone("Asia/Kolkata")
-    today = date.today()
-    now = datetime.now(tz)
-    time_str = now.strftime("%H:%M:%S %p")
+
+    # 🕒 Restart log
     try:
+        tz = pytz.timezone("Asia/Kolkata")
+        now = datetime.now(tz)
         await SilentX.send_message(
             chat_id=LOG_CHANNEL,
-            text=script.RESTART_TXT.format(temp.B_LINK, today, time_str),
+            text=script.RESTART_TXT.format(
+                temp.B_LINK,
+                date.today(),
+                now.strftime("%H:%M:%S")
+            ),
         )
     except Exception as e:
-        LOGGER.error(f"Error Sending Restart Log: {e}")
+        LOGGER.error(f"Restart log error: {e}")
+
+    # 🌐 Web server (Render fix)
     app = web.AppRunner(await web_server())
     await app.setup()
-    bind_address = "0.0.0.0"
-    await web.TCPSite(app, bind_address, PORT).start()
+    await web.TCPSite(app, "0.0.0.0", PORT).start()
 
+    LOGGER.info(f"🌐 Web server running on port {PORT}")
+
+    # 🔄 Idle
     await idle()
 
 
+# ▶️ RUN
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     try:
         loop.run_until_complete(SilentXBotz_start())
     except KeyboardInterrupt:
-        LOGGER.info("Service Stopped Bye 👋")
+        LOGGER.info("👋 Bot Stopped")
